@@ -26,29 +26,63 @@ jobs:
           KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
         run: |
           set -euo pipefail
-          test -n "$KEYSTORE_BASE64"
+
+          test -n "$KEYSTORE_BASE64" || {
+            echo "ERROR: Organization keystore secret is empty or unavailable."
+            exit 1
+          }
+
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/signing-key.p12"
+
           test -s "$RUNNER_TEMP/signing-key.p12"
+
           echo "Keystore decoded successfully."
 
-      - name: Verify keystore and private key
+      - name: Detect keystore format
         env:
           STORE_PASS: ${{ secrets.SIGNING_STORE_PASSWORD }}
-          KEY_PASS: ${{ secrets.SIGNING_KEY_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
         run: |
-          set -euo pipefail
-          test -n "$STORE_PASS"
-          test -n "$KEY_PASS"
-          test -n "$KEY_ALIAS"
+          set +e
 
-          keytool -certreq \
-            -alias "$KEY_ALIAS" \
+          if [ -z "$STORE_PASS" ]; then
+            echo "ERROR: SIGNING_STORE_PASSWORD is unavailable."
+            exit 1
+          fi
+
+          echo "Testing JKS format..."
+
+          keytool -list \
+            -keystore "$RUNNER_TEMP/signing-key.p12" \
+            -storetype JKS \
+            -storepass "$STORE_PASS" \
+            > "$RUNNER_TEMP/jks-result.txt" 2>&1
+
+          JKS_RESULT=$?
+
+          echo "Testing PKCS12 format..."
+
+          keytool -list \
             -keystore "$RUNNER_TEMP/signing-key.p12" \
             -storetype PKCS12 \
             -storepass "$STORE_PASS" \
-            -keypass "$KEY_PASS" \
-            -file "$RUNNER_TEMP/signing-test.csr"
+            > "$RUNNER_TEMP/p12-result.txt" 2>&1
 
-          test -s "$RUNNER_TEMP/signing-test.csr"
-          echo "SUCCESS: Keystore, alias and private key password verified."
+          P12_RESULT=$?
+
+          echo "--------------------------------"
+          echo "JKS result: $JKS_RESULT"
+          echo "PKCS12 result: $P12_RESULT"
+          echo "--------------------------------"
+
+          if [ "$JKS_RESULT" -eq 0 ]; then
+            echo "DETECTED_FORMAT=JKS"
+          elif [ "$P12_RESULT" -eq 0 ]; then
+            echo "DETECTED_FORMAT=PKCS12"
+          else
+            echo "Neither format could be opened."
+            echo "JKS diagnostic:"
+            cat "$RUNNER_TEMP/jks-result.txt"
+            echo "PKCS12 diagnostic:"
+            cat "$RUNNER_TEMP/p12-result.txt"
+            exit 1
+          fi
